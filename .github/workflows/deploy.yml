@@ -12,6 +12,9 @@ jobs:
     permissions:
       contents: write
 
+    outputs:
+      is_completed: ${{ steps.build_page.outputs.is_build }}
+
     steps:
       
       - name: Checkout repository
@@ -42,24 +45,31 @@ jobs:
         run: npm run script
       
       - name: Autocomit track file
+        id: auto-commit
         uses: stefanzweifel/git-auto-commit-action@v6
         with:
           commit_message: 'Automated Change'
       
-      - name: Install package Node
-        run: npm install 
-      
-      - name: Build page 
-        run: npm run build
+      - name: Install and build
+        if: steps.auto-commit.outputs.changes_detected == 'true'
+        id: build_page
+        run: |
+          npm install
+          npm run build
+          echo "is_build=true" >> $GITHUB_OUTPUT
       
       - name: Upload static files as artifact
+        if: steps.build_page.outputs.is_build == 'true'
         uses: actions/upload-pages-artifact@v3
         with:
           path: dist/
 
   deploy:
+    
     needs: build
     
+    if: needs.build.outputs.is_completed == 'true'
+
     permissions:
       pages: write
       id-token: write
@@ -68,8 +78,8 @@ jobs:
     
     environment:
       name: github-pages
-    
       url: ${{ steps.deployment.outputs.page_url }}
+    
     steps:
       - name: Deploy to Gihutb Pages
         id: deployment
