@@ -1,0 +1,76 @@
+name: Deploy to newsletter cadiem
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    
+    permissions:
+      contents: write
+
+    steps:
+      
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20.x
+          cache: 'npm'
+      
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+      
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+          cache: 'pip'
+      
+      - name: Install package Python
+        run: npm run install-package-py
+      
+      - name: Run script 
+        run: npm run script
+      
+      - name: Autocomit track file
+        uses: stefanzweifel/git-auto-commit-action@v6
+        with:
+          commit_message: 'Automated Change'
+      
+      - name: Install package Node
+        run: npm install 
+      
+      - name: Build page 
+        run: npm build
+      
+      - name: Upload static files as artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist/
+
+  deploy:
+    needs: build
+    
+    permissions:
+      pages: write
+      id-token: write
+    
+    runs-on: ubuntu-latest
+    
+    environment:
+      name: github-pages
+    
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to Gihutb Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
