@@ -7,7 +7,7 @@
 
 Key Features:
 - **PDF Parsing & Extraction**: Automatically extracts tables from Cadiem's newsletter.
-- **Data Transformation**: Converts extracted data into user-friendly formats like larger, more intuitive views.
+- **Data Transformation**: Convert extracted data into a more intuitive and user-friendly table.
 
 
 ## Requirements
