@@ -26,6 +26,9 @@ class RootListJSON(RootModel[list[ResponseJSON]]):
 
     def __getitem__(self,item: int) -> ResponseJSON:
         return self.root[item]
+    
+    def getlist(self) -> list[ResponseJSON]:
+        return self.root
 
 class TableData(BaseModel):
     title: str | None = None
@@ -342,19 +345,21 @@ def main() -> None:
         response.raise_for_status()
 
         root_list_json = RootListJSON.model_validate(response.json())
-        with open(path.join(ROOT_PATH,"track.json"), mode='r') as out:
-            track_json = TrackJSON.model_validate(json.load(out))
-            if track_json.newsletter_date is None or track_json.updated_at is None:
-                track_json.newsletter_date = extrac_date_from_string(root_list_json[0].slug)
-                track_json.updated_at = root_list_json[0].date
-                saveToJson(track_json, "track.json")
-                get_extract_tables(root_list_json[0].source_url)
-            else:
-                if is_not_equal_time(track_json.updated_at, root_list_json[0].date):
-                    track_json.newsletter_date = extrac_date_from_string(root_list_json[0].slug)
-                    track_json.updated_at = root_list_json[0].date
+        mediaType = next((m for m in root_list_json.getlist() if "boletin" in m.slug.lower()), None)
+        if mediaType:
+            with open(path.join(ROOT_PATH,"track.json"), mode='r') as out:
+                track_json = TrackJSON.model_validate(json.load(out))
+                if track_json.newsletter_date is None or track_json.updated_at is None:
+                    track_json.newsletter_date = extrac_date_from_string(mediaType.slug)
+                    track_json.updated_at = mediaType.date
                     saveToJson(track_json, "track.json")
-                    get_extract_tables(root_list_json[0].source_url)
+                    get_extract_tables(mediaType.source_url)
+                else:
+                    if is_not_equal_time(track_json.updated_at, mediaType.date):
+                        track_json.newsletter_date = extrac_date_from_string(mediaType.slug)
+                        track_json.updated_at = mediaType.date
+                        saveToJson(track_json, "track.json")
+                        get_extract_tables(mediaType.source_url)
     except requests.exceptions.RequestException as e:
         print(f"An error ocurred: {e}")
 
