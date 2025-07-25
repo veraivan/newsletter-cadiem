@@ -11,7 +11,6 @@ Key Features:
 
 
 ## Requirements
-- Java 8+
 - Python 3.10+
 - Node 20+
 
