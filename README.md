@@ -1,9 +1,9 @@
 # 📃 newsletter-cadiem
-*A tool designed to extract structured data from Cadiem's daily newsletter PDFs into an intuitive, user-friendly format.*
+*A small tool designed to extract structured data from Cadiem's daily newsletter PDFs into an intuitive, user-friendly format.*
 
 ## Description
 
-📚✨ This project provides a solution for extracting and transforming data from Cadiem's daily newsletter PDFs.
+📚✨ This repo provides a solution for extracting and transforming data from Cadiem's daily newsletter PDFs.
 
 Key Features:
 - **PDF Parsing & Extraction**: Automatically extracts tables from Cadiem's newsletter.
