@@ -23,7 +23,7 @@ const TablePage: FunctionComponent<Props> = ({ tableData }) => {
 							return (
 								<TableCell 
 									key={i} 
-									className="px-6 py-3"
+									className="px-6 py-3 whitespace-normal text-center"
 								>
 									{ header }
 								</TableCell>
@@ -45,7 +45,7 @@ const TablePage: FunctionComponent<Props> = ({ tableData }) => {
 											return (
 												<TableCell
 													key={colId} 
-													className="border px-6 py-4"
+													className="border px-6 py-4 whitespace-normal text-center"
 												>
 													{ col }
 												</TableCell>
