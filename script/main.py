@@ -1,15 +1,23 @@
+from io import BytesIO
+from typing import Callable
 from pydantic import BaseModel, Field, RootModel
 from os import path, getcwd
 from datetime import datetime
-from tabula.io import read_pdf
-from typing import Callable
+import pandas as pd
+import numpy as np
 import requests
+import pdfplumber
 import json
 import re
-import time
-import pandas as pd
 
 ROOT_PATH = path.join(getcwd(), "script")
+ESPECIAL_REPLACEMENT = str.maketrans({
+    "Æ": "á",
+    "æ": "ñ",
+    "œ": "ú",
+    "\n": " "
+})
+PATTERN_CID = re.compile("\\(cid:(\\d+)\\)", re.DOTALL)
 
 class ResponseJSON(BaseModel):
     date: str
@@ -50,9 +58,230 @@ class OutputData(BaseModel):
 def saveToJson(data: TrackJSON | OutputData, file_name: str) -> None:
     try:
         with open(path.join(ROOT_PATH, file_name), mode="w") as file:
-            json.dump(data.model_dump(by_alias=True), file, indent=4)
+            json.dump(data.model_dump(by_alias=True), file, indent=4, ensure_ascii=False)
     except IOError as e:
         print(f"Error saving file: {e}")
+
+
+def replace_cid(match: re.Match[str]) -> str: 
+    return chr(int(match.group(1)))
+
+LAMBDA_CALL: Callable[[str],str] = lambda x: re.sub(PATTERN_CID, replace_cid, x)
+
+def updatedRows(df: pd.DataFrame) -> None:
+    rowsUpdated = []
+    for columnName, rows in df.items():
+        for row in rows:
+            if pd.isna(row) and len(rowsUpdated) > 0:
+                rowsUpdated.append(rowsUpdated[-1])
+            else:
+                rowsUpdated.append(row)
+        df[columnName] = rowsUpdated
+        rowsUpdated = []
+
+
+def funds_to_table_data(df: pd.DataFrame) -> TableData:
+    df.fillna(np.nan, inplace=True)
+    df = df.replace(["None", ""], np.nan)
+    df.dropna(inplace=True)
+    df.columns = [re.sub(PATTERN_CID, replace_cid, col).replace("\n"," ") for col in df.columns]
+    df = df.map(LAMBDA_CALL)
+    df["Pago de rescates"] = df["Pago de rescates"].str.translate(ESPECIAL_REPLACEMENT)
+    return TableData.model_validate(df.to_dict(orient='split', index=False))
+
+
+def investment_to_table_data(df: pd.DataFrame) -> TableData:
+    if not df.empty:
+        df.fillna(np.nan, inplace=True)
+        df = df.replace(["None", ""], np.nan)
+        df.dropna(inplace=True)
+        df["Fondo"] = df["Fondo"].apply(LAMBDA_CALL)
+        df["Plazo"] = df["Plazo"].str.translate(ESPECIAL_REPLACEMENT)
+    return TableData.model_validate(df.to_dict(orient='split', index=False))
+
+
+def split_to_bonds_and_cda(original: pd.DataFrame, dfB: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
+    searchIdx = original[original["Emisor"].notna() & original["Emisor"].str.contains("cda", case=False)].index.to_list()
+    if len(searchIdx) > 0:
+        dfA = original.loc[0:searchIdx[0]-1].copy()
+        dfB = original.loc[searchIdx[0]:].copy()
+        return (dfA, dfB)
+    else:
+        dfA = original.copy()
+        return (dfA, dfB)
+
+
+def bonds_into_table_gs(df: pd.DataFrame) -> TableData:
+    df.fillna(np.nan, inplace=True)
+    df = df.replace(["None", ""], np.nan)
+    removeIdxs = df[df["Emisor"].notna() & df["Emisor"].str.contains('tasas|dólares', case=False)].index
+    df.drop(removeIdxs, inplace=True)
+    df.columns = [re.sub(PATTERN_CID, replace_cid, col).translate(ESPECIAL_REPLACEMENT) for col in df.columns]
+    indexs: list[int] = df[df["Calificación"].notna() & df["Calificación"].str.contains(r'[0-9]')].index.to_list()
+    for i in indexs:
+        values = str(df.loc[i,"Calificación"]).split(" ")
+        df.loc[i,["Calificación", "Rendimiento"]] = values
+    indexs = df[df["Vencimiento"].notna() & df["Vencimiento"].str.contains(r"\n")].index.to_list()
+    for i in indexs:
+        if pd.notna(df.loc[i,"Vencimiento"]):
+            list_values = str(df.loc[i,"Vencimiento"]).split("\n")
+            if len(list_values) > 1:
+                for x in range(0,len(list_values)):
+                    if pd.isna(df.loc[i+x,"Vencimiento"]):
+                        df.loc[i+x,"Vencimiento"] = list_values[x]
+                    else:
+                        df.loc[round(i+x*0.1,1),"Vencimiento"] = list_values[x]
+    df.sort_index(inplace=True, ignore_index=True)
+    df.dropna(how='all', inplace=True)
+    updatedRows(df)
+    df["Disponibilidad"] = df["Disponibilidad"].str.replace(" ", "")
+    df["Emisor"] = df["Emisor"].apply(LAMBDA_CALL).str.translate(ESPECIAL_REPLACEMENT) 
+    return TableData.model_validate(df.to_dict(orient='split', index=False))
+
+
+def cda_into_table_gs(df: pd.DataFrame) -> TableData:
+    if not df.empty:
+        df.fillna(np.nan, inplace=True)
+        df = df.replace(["None", ""], np.nan)
+        df.dropna(how='all',inplace=True)
+        idxCol = df[df["Emisor"].notna() & df["Emisor"].str.contains("emisor", case=False)].index.to_list()
+        if len(idxCol) > 0:
+            df.columns = [re.sub(PATTERN_CID, replace_cid, col).translate(ESPECIAL_REPLACEMENT) for col in list(df.loc[idxCol[0]])]
+        removeIdxs = df[df["Emisor"].notna() & df["Emisor"].str.contains("tasas|renta|bonos|cda|emisor", case=False)].index
+        df.drop(removeIdxs, inplace=True)
+        updatedRows(df)
+        df["Valor Nominal"] = df["Valor Nominal"].replace(r"\s+", "", regex=True)
+    return TableData.model_validate(df.to_dict(orient='split', index=False))
+
+
+def bonds_into_table_usd(df: pd.DataFrame) -> TableData:
+    df.fillna(np.nan, inplace=True)
+    df = df.replace(["None", ""], np.nan)
+    df.columns = [re.sub(PATTERN_CID, replace_cid, col).translate(ESPECIAL_REPLACEMENT) for col in df.columns]
+    removeIdxs = df[df["Emisor"].notna() & df["Emisor"].str.contains("tasas|bonos|cda|emisor", case=False)].index
+    df.drop(removeIdxs,inplace=True)
+    indexs: list[int] = df[df["Calificación"].notna() & df["Calificación"].str.contains(r'[0-9]')].index.to_list()
+    for i in indexs:
+        values = str(df.loc[i,"Calificación"]).split(" ")
+        df.loc[i,["Calificación", "Rendimiento"]] = values
+    index_list: list[int] = df[df["Rendimiento"].notna() & df["Rendimiento"].str.contains(r"\n")].index.to_list()
+    for index in index_list:
+        for col in df.columns:
+            if pd.notna(df.loc[index,col]):
+                list_values = str(df.loc[index,col]).split("\n")
+                if len(list_values) > 1:
+                    for x in range(0,len(list_values)):
+                        if pd.isna(df.loc[index+x,col]):
+                            df.loc[index+x,col] = list_values[x]
+                        else:
+                            df.loc[round(index+x*0.1,1),col] = list_values[x]
+    df.sort_index(inplace=True, ignore_index=True)
+    df.dropna(how='all', inplace=True)
+    updatedRows(df)
+    df["Emisor"] = df["Emisor"].apply(LAMBDA_CALL).str.translate(ESPECIAL_REPLACEMENT)
+    df[["Disponibilidad", "Plazo Residual en años"]] = df[["Disponibilidad", "Plazo Residual en años"]].replace(r"\s+", "", regex=True)
+    return TableData.model_validate(df.to_dict(orient='split', index=False))
+
+
+def cda_into_table_usd(df: pd.DataFrame) -> TableData:
+    if not df.empty:
+        df = df.astype("string")
+        df.fillna(np.nan, inplace=True)
+        df = df.replace(["None", ""], np.nan)
+        idxCol = df[df["Emisor"].notna() & df["Emisor"].str.contains("emisor", case=False)].index.to_list()
+        if len(idxCol) > 0:
+            df.columns = [re.sub(PATTERN_CID, replace_cid, col).translate(ESPECIAL_REPLACEMENT) for col in df.loc[idxCol[0]]]
+        removeIdxs = df[df["Emisor"].notna() & df["Emisor"].str.contains("tasas|emisor|cda", case=False)].index
+        df.drop(removeIdxs, inplace=True)
+        indexs: list[int] = df[df["Emisor"].notna() & df["Emisor"].str.contains(r'[0-9]')].index.to_list()
+        pattern = r"(\w+\s\w+)\s([A-Z]+[\s|\-|\+]?py)\s([0-9]+,[0-9]{2}%)"
+        for i in indexs:
+            match = re.search(pattern, str(df.loc[i,"Emisor"]))
+            if match:
+                df.loc[i,["Emisor","Calificación", "Tasa"]] =  list(match.groups())
+        df.dropna(how='all', inplace=True)
+        df.drop(df[df["Calificación"].str.contains("entidad|vencimiento", case=False, na=False)].index, inplace=True)
+        updatedRows(df)
+    return TableData.model_validate(df.to_dict(orient='split', index=False))
+
+
+def create_dataframe(table: list[list[str | None]]) -> pd.DataFrame:
+    index = 0
+    if "Emisor" not in table[0]:
+        for i, item in enumerate(table):
+            if "Emisor" in item:
+                index = i
+                break
+    return pd.DataFrame(table[index+1:], columns=table[index])
+
+def build_tables_not_stock(tables: list[list[list[str | None]]]) -> list[TableData]:
+    mutualFundsGs = pd.DataFrame()
+    mutualFundsUsd = pd.DataFrame()
+    investmentFundsGs = pd.DataFrame()
+    investmentFundsUsd = pd.DataFrame()
+    bondsGs = pd.DataFrame()
+    cdaGs = pd.DataFrame()
+    bondsUsd = pd.DataFrame()
+    cdaUsd = pd.DataFrame()
+
+    for table in tables:
+        if len(table[0]) == 7:
+            if "Rendimiento" in table[0]:
+                if any(col and "G" in col for col in table[1]): 
+                    mutualFundsGs = pd.DataFrame(table[1:], columns=table[0])
+                else:
+                    mutualFundsUsd = pd.DataFrame(table[1:], columns=table[0])
+            else:
+                if any(col and "USD" in col for col in table[1]):
+                    investmentFundsUsd = pd.DataFrame(table[1:], columns=table[0])
+                else:
+                    investmentFundsGs = pd.DataFrame(table[1:], columns=table[0])
+        else:
+            if "Tasa" in table[0]:
+                cdaUsd = pd.DataFrame(table[1:],columns=table[0])
+            else:
+                other = create_dataframe(table)
+                searchIdx = other[other["Emisor"].notna() & other["Emisor"].str.contains("bonos", case=False)].index.to_list()
+                if len(searchIdx) > 0:
+                    bondsGs, cdaGs = split_to_bonds_and_cda(other.loc[:searchIdx[0]], cdaGs)
+                    bondsUsd, cdaUsd = split_to_bonds_and_cda(other.loc[searchIdx[0]:], cdaUsd)
+                else:
+                    isGs = other["Disponibilidad"].str.contains("\\d+[\\.,]\\d+[\\.,]\\d+", regex=True, na=False).any()
+                    if isGs:
+                        bondsGs, cdaGs = split_to_bonds_and_cda(other, cdaGs)
+                    else:
+                        bondsUsd, cdaUsd = split_to_bonds_and_cda(other, cdaUsd)
+    
+    tds: list[TableData] = []
+    tds.append(funds_to_table_data(mutualFundsGs))
+    tds.append(funds_to_table_data(mutualFundsUsd))
+    tds.append(investment_to_table_data(investmentFundsGs))
+    tds.append(investment_to_table_data(investmentFundsUsd))
+    tds.append(bonds_into_table_gs(bondsGs))
+    tds.append(cda_into_table_gs(cdaGs))
+    tds.append(bonds_into_table_usd(bondsUsd))
+    tds.append(cda_into_table_usd(cdaUsd))
+    
+    return tds
+
+
+def extract_stocks_in_gs(table: list[list[str | None]]) -> TableData:
+    idx_header = 0
+    for i, row in enumerate(table):
+        if "Emisor" in row:
+            idx_header = i
+            break
+    
+    stocksGs = pd.DataFrame(table[idx_header+1:], columns=table[idx_header])
+    stocksGs.columns = [re.sub(PATTERN_CID, replace_cid, col).translate(ESPECIAL_REPLACEMENT) for col in stocksGs.columns]
+    stocksGs.fillna(np.nan, inplace=True)
+    stocksGs = stocksGs.replace(["None", ""], np.nan)
+    stocksGs.dropna(how='all', inplace=True)
+    updatedRows(stocksGs)
+    stocksGs["Observaciones"] = stocksGs["Observaciones"].apply(LAMBDA_CALL)
+    stocksGs["Observaciones"] = stocksGs["Observaciones"].str.translate(ESPECIAL_REPLACEMENT)
+    stocksGs[["Disponibilidad", "Precio", "Valor de venta"]] = stocksGs[["Disponibilidad", "Precio", "Valor de venta"]].replace(r"\s+", "", regex=True)
+    return TableData.model_validate(stocksGs.to_dict(orient='split', index=False))
 
 
 def extrac_date_from_string(text: str) -> str:
@@ -73,257 +302,38 @@ def is_not_equal_time(date_string1: str, date_string2: str) -> bool:
     else:
         return False
 
+def get_pdf_extract(url: str) -> None:
+    try:
+        response = requests.get(url)
+        response.raise_for_status()
 
-def clear_funds_table(df: pd.DataFrame) -> None:
-    df.dropna(inplace=True)
-    df.columns = [col.replace("\r", " ") for col in df.columns]
-    replace_string: Callable[[str], str] = lambda x: x.replace("\r", " ")
-    df["Fondo"] = df["Fondo"].apply(replace_string)
+        bytes_pdf = BytesIO(response.content)
+        pdf = pdfplumber.open(bytes_pdf)
 
-
-def updatedRows(df: pd.DataFrame) -> None:
-    rowsUpdated = []
-    for columnName, rows in df.items():
-        for row in rows:
-            if pd.isna(row) and len(rowsUpdated) > 0:
-                rowsUpdated.append(rowsUpdated[-1])
-            else:
-                rowsUpdated.append(row)
-        df[columnName] = rowsUpdated
-        rowsUpdated = []
-
-
-def extract_investment_funds_table(funds: list[pd.DataFrame]) -> tuple[pd.DataFrame, pd.DataFrame]:
-    invest_funds_gs = pd.DataFrame()
-    invest_funds_usd = pd.DataFrame()
-
-    size = len(funds)
-    if size == 3:
-        if "₲" in funds[2].iat[0,4]:
-            invest_funds_gs = funds[2].copy()
-            clear_funds_table(invest_funds_gs)
+        tables = pdf.pages[0].extract_tables()
+        tableStock: list[list[str | None]] | None  = []
+        stocksGsTable = TableData()
+        if len(pdf.pages) == 3:
+            tables = tables + pdf.pages[1].extract_tables()
+            tableStock = pdf.pages[2].extract_table()
         else:
-            invest_funds_usd = funds[2].copy()
-            clear_funds_table(invest_funds_usd)
-    elif size == 4:
-        invest_funds_gs = funds[2].copy()
-        invest_funds_usd = funds[3].copy()
-        clear_funds_table(invest_funds_gs)
-        clear_funds_table(invest_funds_usd)
-    
-    invest_funds_gs = invest_funds_gs.astype(str)
-    invest_funds_usd = invest_funds_usd.astype(str)
-
-    return (invest_funds_gs, invest_funds_usd)
-
-
-def extract_other_tables(others: list[pd.DataFrame]) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    bonds_gs_origin = pd.DataFrame()
-    cda_gs_origin = pd.DataFrame()
-    bonds_usd_origin = pd.DataFrame()
-    cda_usd_origin = pd.DataFrame()
-    stocks = pd.DataFrame()
-
-    for other in others:
-        if any("Precio Clean" in col for col in other.columns):
-            if any(other["Emisor"].notna() & other["Emisor"].str.contains("dólares", case=False)):
-                bonds_gs_origin = other.copy()
-            else:
-                bonds_usd_origin = other.copy()
-        elif "Valor Nominal" in other.columns:
-            if "Tasa" in other.columns:
-                cda_usd_origin = other.copy()
-            else:
-                cda_gs_origin = other
-        elif "Clase" in other.columns or other.iat[0,0] == 'Acciones':
-            stocks = other.copy()
-    
-    
-    if bonds_usd_origin.empty and not bonds_gs_origin.empty:
-        indexs = bonds_gs_origin[bonds_gs_origin["Emisor"].notna() & bonds_gs_origin["Emisor"].str.contains("dólares", case=False)].index.to_list()
-        if len(indexs) > 0:
-            bonds_usd_origin = bonds_gs_origin.iloc[indexs[0]+1:]
-            bonds_gs_origin = bonds_gs_origin.iloc[0:indexs[0]]
-
-    if cda_gs_origin.empty and not bonds_gs_origin.empty:
-        indexs = bonds_gs_origin[bonds_gs_origin["Emisor"].notna() & bonds_gs_origin["Emisor"].str.contains("cda", case=False)].index.to_list()
-        if len(indexs) > 0:
-            cda_gs_origin = bonds_gs_origin.iloc[indexs[0]+1:]
-            bonds_gs_origin = bonds_gs_origin.iloc[0:indexs[0]]
-
-    if cda_usd_origin.empty and not bonds_usd_origin.empty:
-        indexs = bonds_usd_origin[bonds_usd_origin["Emisor"].notna() & bonds_usd_origin["Emisor"].str.contains("cda", case=False)].index.to_list()
-        if len(indexs) > 0:
-            cda_usd_origin = bonds_usd_origin.loc[indexs[0]+1:]
-            bonds_usd_origin = bonds_usd_origin.loc[:indexs[0]-1]
-    
-    return (
-        bonds_gs_origin,
-        bonds_usd_origin,
-        cda_gs_origin,
-        cda_usd_origin,
-        stocks
-    )
-
-
-def build_table_and_clean_bonds_gs(bondsGs: pd.DataFrame) -> None:
-    bondsGs.columns = [col.replace("\r", " ") for col in bondsGs.columns]
-    cols =  bondsGs.columns.to_list()
-    bondsGs.dropna(how='all', inplace=True)
-    removeIdxs = bondsGs[bondsGs["Emisor"].notna() & bondsGs["Emisor"].str.contains("tasas|dólares",case=False)].index
-    bondsGs.drop(removeIdxs, inplace=True)
-    indexs_list: list[int] = bondsGs.index.to_list()
-    for idx in indexs_list:
-        if pd.notna(bondsGs.loc[idx,"Calificación"]) and re.search(r"[0-9]+", str(bondsGs.loc[idx,"Calificación"])):
-            match = re.search(r"([A-Z]+[\s|\-|\+]?py)([0-9]+,[0-9]{2}%)", str(bondsGs.loc[idx,"Calificación"]))
-            if match:
-                bondsGs.loc[idx,cols[1:]] = [match.group(1), match.group(2)] + bondsGs.loc[idx, cols[-1:] + cols[3:-1]].to_list()
-            else:
-                bondsGs.loc[idx, cols[1:]] = bondsGs.loc[idx, cols[-1:] + cols[1:-1]].values
-
-    filteredIdxs = bondsGs[bondsGs["Pago de intereses"].notna() & bondsGs["Pago de intereses"].str.contains(r'[0-9]')].index
-    bondsGs.loc[filteredIdxs, cols[3:]] = bondsGs.loc[filteredIdxs, cols[-1:] + cols[3:-1]].values
-    updatedRows(bondsGs)
-    bondsGs["Disponibilidad"] = bondsGs["Disponibilidad"].replace(r"\s+", "", regex=True)
-    bondsGs = bondsGs.astype(str)
-
-
-def build_table_and_clean_cda_gs(cdaGs: pd.DataFrame) -> None:
-    if not cdaGs.empty:
-        cdaGs.dropna(how='all', inplace=True)
-        removeIdxs = cdaGs[cdaGs["Emisor"].notna() & cdaGs["Emisor"].str.contains("tasas|renta",case=False)].index
-        cdaGs.drop(removeIdxs, inplace=True)
-        if "Valor Nominal" not in cdaGs.columns:
-            cdaGs.columns = cdaGs.iloc[0].values
-            cdaGs.drop([cdaGs.index[0]], inplace=True)
+            tableStock = pdf.pages[1].extract_table()
         
-        cols = cdaGs.columns.to_list()
-        fixValueIdxs = cdaGs[cdaGs["Calificación"].notna() & cdaGs["Calificación"].str.contains(r'[0-9]')].index
-        cdaGs.loc[fixValueIdxs, cols[1:]] = cdaGs.loc[fixValueIdxs, cols[-1:] + cols[1:-1]].values
-        fixValueIdxs = cdaGs[cdaGs["Pago de intereses"].notna() & cdaGs["Pago de intereses"].str.contains(r'[0-9]')].index
-        cdaGs.loc[fixValueIdxs, cols[3:]] = cdaGs.loc[fixValueIdxs, cols[-1:] + cols[3:-1]].values
-        updatedRows(cdaGs)
-        cdaGs["Valor Nominal"] = cdaGs["Valor Nominal"].replace(r"\s+", "", regex=True)
-        cdaGs = cdaGs.astype(str)
-
-
-def build_table_and_clean_bonds_usd(bondsUsd: pd.DataFrame) -> None:
-    bondsUsd.columns = [col.replace("\r", " ") for col in bondsUsd.columns]
-    cols = bondsUsd.columns.tolist()
-    bondsUsd.dropna(how='all', inplace=True)
-    removeIdxs = bondsUsd[bondsUsd["Emisor"].notna() & bondsUsd["Emisor"].str.contains("emisor|bonos|tasas",case=False)].index
-    bondsUsd.drop(removeIdxs, inplace=True)
+        list_tables  = build_tables_not_stock(tables)
+        if tableStock:
+            stocksGsTable = extract_stocks_in_gs(tableStock)        
     
-    index_list: list[int] = bondsUsd[bondsUsd["Rendimiento"].notna() & bondsUsd["Rendimiento"].str.contains(r"\r")].index.to_list()
-    for index in index_list:
-        for col in cols:
-            if pd.notna(bondsUsd.loc[index,col]):
-                list_values = str(bondsUsd.loc[index,col]).split("\r")
-                if len(list_values) > 1:
-                    for x in range(0,len(list_values)):
-                        if pd.isna(bondsUsd.loc[index+x,col]):
-                            bondsUsd.loc[index+x,col] = list_values[x]
-                        else:
-                            bondsUsd.loc[round(index+x*0.1,1),col] = list_values[x]
-    
-    bondsUsd.sort_index(inplace=True)
-    filteredIdxs = bondsUsd[bondsUsd["Emisor"].notna() & bondsUsd["Emisor"].str.contains(r'[0-9]')].index
-    bondsUsd.loc[filteredIdxs, cols] = bondsUsd.loc[filteredIdxs, cols[-1:] + cols[:-1]].values
-
-    filteredIdxs = bondsUsd[bondsUsd["Calificación"].notna() & bondsUsd["Calificación"].str.contains(r'[0-9]')].index
-    bondsUsd.loc[filteredIdxs, cols[1:]] = bondsUsd.loc[filteredIdxs, cols[-1:] + cols[1:-1]].values
-
-    filteredIdxs = bondsUsd[bondsUsd["Pago de intereses"].notna() & bondsUsd["Pago de intereses"].str.contains(r'[0-9]')].index
-    bondsUsd.loc[filteredIdxs, cols[3:]] = bondsUsd.loc[filteredIdxs, cols[-1:] + cols[3:-1]].values
-
-    updatedRows(bondsUsd)
-    bondsUsd["Disponibilidad"] = bondsUsd["Disponibilidad"].replace(r"\s+", "", regex=True)
-    bondsUsd = bondsUsd.astype(str)
-
-
-def build_table_and_clean_cda_usd(cdaUsd: pd.DataFrame) -> None:
-    if not cdaUsd.empty:
-        cdaUsd.dropna(how='all', inplace=True)
-        removeIdxs = cdaUsd[cdaUsd["Emisor"].notna() & cdaUsd["Emisor"].str.contains("tasas|cualquier",case=False)].index
-        cdaUsd.drop(removeIdxs, inplace=True)
-        if "Valor Nominal" not in cdaUsd.columns:
-            cdaUsd.columns = cdaUsd.iloc[0].values
-            cdaUsd.drop([cdaUsd.index[0]], inplace=True)
-        filteredIdxs = cdaUsd[cdaUsd["Pago de Intereses"].notna() & cdaUsd["Pago de Intereses"].str.contains(r'[0-9]')].index
-        cols = cdaUsd.columns.tolist()[3:]
-        colsInve = cols[-1:] + cols[:-1]
-        cdaUsd.loc[filteredIdxs, cols] = cdaUsd.loc[filteredIdxs, colsInve].values
-        updatedRows(cdaUsd)
-        cdaUsd = cdaUsd.astype(str)
-
-
-def build_table_and_clean_stocks_gs(stocksGs: pd.DataFrame) -> None:
-    if any('Unnamed' in col for col in stocksGs.columns):
-        stocksGs.columns = [col.replace("\r", " ") for col in stocksGs.iloc[1]]
-        removeIdx = stocksGs[stocksGs["Emisor"].notna() & stocksGs["Emisor"].str.contains(r'contactar|whatsapp', case=False)].index.to_list()
-        removeIdx = [0,1] + removeIdx  
-        stocksGs.drop(removeIdx, inplace=True)
-        stocksGs.dropna(how='all', inplace=True)
-        filtered_idxs = stocksGs[stocksGs["Valor de venta"].isna() & stocksGs["Observaciones"].isna()].index
-        cols = stocksGs.columns.tolist()
-        colsInv = cols[-1:] + cols[-2:-1] + cols[:-2]
-        stocksGs.loc[filtered_idxs, cols] = stocksGs.loc[filtered_idxs, colsInv].values
-        filtered_idxs = stocksGs[stocksGs["Valor de venta"].isna()].index
-        colsInv = cols[-2:-1] + cols[2:-2]
-        stocksGs.loc[filtered_idxs, cols[2:-1]] = stocksGs.loc[filtered_idxs, colsInv].values
-    else:
-        stocksGs.columns = [col.replace("\r", " ") for col in stocksGs.columns]
-        fixValuesIndex = stocksGs[stocksGs["Emisor"].notna() & stocksGs["Emisor"].str.contains(r'[0-9]')].index
-        cols = stocksGs.columns.tolist()
-        colsInver = cols[-1:] + cols[-2:-1] + cols[-3:-2] + cols[-4:-3] + cols[:-4]
-        stocksGs.loc[fixValuesIndex, cols] = stocksGs.loc[fixValuesIndex, colsInver].values
-
-    updatedRows(stocksGs)
-    stocksGs["Observaciones"] = stocksGs["Observaciones"].str.replace("\r", " ")
-    stocksGs[["Disponibilidad", "Precio","Valor de venta"]] = stocksGs[["Disponibilidad","Precio","Valor de venta"]].replace(r"\s+", "", regex=True)
-    stocksGs = stocksGs.astype(str)
-
-
-def get_extract_tables(source: str) -> None:
-    dfs = read_pdf(source, pages='all', lattice=True)
-    if isinstance(dfs, list):
-        funds: list[pd.DataFrame]= []
-        others: list[pd.DataFrame]= []
-        for df in dfs:
-            if df.shape[1] == 7:
-                funds.append(df)
-            elif df.shape[1] == 8:
-                others.append(df)
-        
-        #Clear the primary funds GS
-        clear_funds_table(funds[0])
-        
-        #Clear the second fduns USD
-        clear_funds_table(funds[1])
-        
-        #Investment funds
-        invest_funds_gs, invest_funds_usd = extract_investment_funds_table(funds)
-
-        #Others Tables
-        bonds_gs_origin, bonds_usd_origin, cda_gs_origin, cda_usd_origin, stocksGs = extract_other_tables(others)
-        build_table_and_clean_bonds_gs(bonds_gs_origin)
-        build_table_and_clean_cda_gs(cda_gs_origin)
-        build_table_and_clean_bonds_usd(bonds_usd_origin)
-        build_table_and_clean_cda_usd(cda_usd_origin)
-        build_table_and_clean_stocks_gs(stocksGs)
-
         output_data = OutputData(
-            mutualFundsGs=TableData.model_validate(funds[0].to_dict(orient='split', index=False)),
-            mutualFundsUsd=TableData.model_validate(funds[1].to_dict(orient='split', index=False)),
-            investmentFundsGs=TableData.model_validate(invest_funds_gs.to_dict(orient='split', index=False)),
-            investmentFundsUsd=TableData.model_validate(invest_funds_usd.to_dict(orient='split', index=False)),
-            bondsGs=TableData.model_validate(bonds_gs_origin.to_dict(orient='split', index=False)),
-            cdaGs=TableData.model_validate(cda_gs_origin.to_dict(orient='split', index=False)),
-            bondsUsd=TableData.model_validate(bonds_usd_origin.to_dict(orient='split',index=False)),
-            cdaUsd=TableData.model_validate(cda_usd_origin.to_dict(orient='split', index=False)),
-            stocks=TableData.model_validate(stocksGs.to_dict(orient='split', index=False))
+            mutualFundsGs=list_tables[0],
+            mutualFundsUsd=list_tables[1],
+            investmentFundsGs=list_tables[2],
+            investmentFundsUsd=list_tables[3],
+            bondsGs=list_tables[4],
+            cdaGs=list_tables[5],
+            bondsUsd=list_tables[6],
+            cdaUsd=list_tables[7],
+            stocks=stocksGsTable
         )
-
         output_data.mutual_funds_Gs.title = "Fondos Mutuos en Guaraníes"
         output_data.mutual_funds_usd.title = "Fondos Mutuos en Dólares"
         output_data.investment_funds_gs.title = "Fondos de Inversión en Guaraníes"
@@ -335,11 +345,15 @@ def get_extract_tables(source: str) -> None:
         output_data.stocksGs.title = "Acciones"
 
         saveToJson(output_data, 'output_data.json')
+    except requests.exceptions.RequestException as e:
+        print(f"An error ocurred while trying to get to the PDF: {e}")
+
 
 
 def main() -> None:
     url = "https://www.cadiem.com.py/wp-json/wp/v2/media"
     params = { "media_type": "application" }
+
     try:
         response = requests.get(url, params=params)
         response.raise_for_status()
@@ -353,20 +367,16 @@ def main() -> None:
                     track_json.newsletter_date = extrac_date_from_string(mediaType.slug)
                     track_json.updated_at = mediaType.date
                     saveToJson(track_json, "track.json")
-                    get_extract_tables(mediaType.source_url)
+                    get_pdf_extract(mediaType.source_url)
                 else:
                     if is_not_equal_time(track_json.updated_at, mediaType.date):
                         track_json.newsletter_date = extrac_date_from_string(mediaType.slug)
                         track_json.updated_at = mediaType.date
                         saveToJson(track_json, "track.json")
-                        get_extract_tables(mediaType.source_url)
+                        get_pdf_extract(mediaType.source_url)
     except requests.exceptions.RequestException as e:
-        print(f"An error ocurred: {e}")
-
+        print(f"An error ocurred while trying to get to the URL: {e}")
+        
 
 if __name__ == "__main__":
-    start_time = time.time()
     main()
-    end_time = time.time()
-    final_time = end_time - start_time
-    print(f"\n\nTime execution: {time.strftime("%H:%M:%S",time.gmtime(final_time))}")
