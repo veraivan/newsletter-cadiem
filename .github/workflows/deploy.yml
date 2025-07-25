@@ -25,12 +25,6 @@ jobs:
           node-version: 20.x
           cache: 'npm'
       
-      - name: Setup Java
-        uses: actions/setup-java@v4
-        with:
-          distribution: 'temurin'
-          java-version: '17'
-      
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
