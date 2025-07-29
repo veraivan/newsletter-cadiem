@@ -191,7 +191,7 @@ def cda_into_table_usd(df: pd.DataFrame) -> TableData:
         idxCol = df[df["Emisor"].notna() & df["Emisor"].str.contains("emisor", case=False)].index.to_list()
         if len(idxCol) > 0:
             df.columns = [re.sub(PATTERN_CID, replace_cid, col).translate(ESPECIAL_REPLACEMENT) for col in df.loc[idxCol[0]]]
-        removeIdxs = df[df["Emisor"].notna() & df["Emisor"].str.contains("tasas|emisor|cda", case=False)].index
+        removeIdxs = df[df["Emisor"].notna() & df["Emisor"].str.contains("tasas|emisor|cda|renta", case=False)].index
         df.drop(removeIdxs, inplace=True)
         indexs: list[int] = df[df["Emisor"].notna() & df["Emisor"].str.contains(r'[0-9]')].index.to_list()
         pattern = r"(\w+\s\w+)\s([A-Z]+[\s|\-|\+]?py)\s([0-9]+,[0-9]{2}%)"
@@ -214,6 +214,26 @@ def create_dataframe(table: list[list[str | None]]) -> pd.DataFrame:
                 break
     return pd.DataFrame(table[index+1:], columns=table[index])
 
+
+def extract_stocks_in_gs(df: pd.DataFrame) -> TableData:
+    idxCol = df[df["Emisor"].notna() & df["Emisor"].str.contains("emisor", case=False)].index.to_list()
+    columns: list[str] = []
+    if len(idxCol) > 0:
+        columns = df.loc[idxCol[0]].tolist()
+    else:
+        columns = df.columns.to_list()
+    df.drop(idxCol,inplace=True)
+    df.columns = [re.sub(PATTERN_CID, replace_cid, col).translate(ESPECIAL_REPLACEMENT) for col in columns]
+    df.fillna(np.nan, inplace=True)
+    df = df.replace(["None", ""], np.nan)
+    df.dropna(how='all', inplace=True)
+    updatedRows(df)
+    df["Observaciones"] = df["Observaciones"].apply(LAMBDA_CALL)
+    df["Observaciones"] = df["Observaciones"].str.translate(ESPECIAL_REPLACEMENT)
+    df[["Disponibilidad", "Precio", "Valor de venta"]] = df[["Disponibilidad", "Precio", "Valor de venta"]].replace(r"\s+", "", regex=True)
+    return TableData.model_validate(df.to_dict(orient='split', index=False))
+
+
 def build_tables_not_stock(tables: list[list[list[str | None]]]) -> list[TableData]:
     mutualFundsGs = pd.DataFrame()
     mutualFundsUsd = pd.DataFrame()
@@ -223,6 +243,7 @@ def build_tables_not_stock(tables: list[list[list[str | None]]]) -> list[TableDa
     cdaGs = pd.DataFrame()
     bondsUsd = pd.DataFrame()
     cdaUsd = pd.DataFrame()
+    accionsGs = pd.DataFrame()
 
     for table in tables:
         if len(table[0]) == 7:
@@ -241,6 +262,11 @@ def build_tables_not_stock(tables: list[list[list[str | None]]]) -> list[TableDa
                 cdaUsd = pd.DataFrame(table[1:],columns=table[0])
             else:
                 other = create_dataframe(table)
+                searchIdx = other[other["Emisor"].notna() & other["Emisor"].str.contains("acciones", case=False)].index.to_list()
+                if len(searchIdx) > 0:
+                    accionsGs = other.loc[searchIdx[0]+1:]
+                    other = other.loc[:searchIdx[0]-1]
+                
                 searchIdx = other[other["Emisor"].notna() & other["Emisor"].str.contains("bonos", case=False)].index.to_list()
                 if len(searchIdx) > 0:
                     bondsGs, cdaGs = split_to_bonds_and_cda(other.loc[:searchIdx[0]], cdaGs)
@@ -261,27 +287,8 @@ def build_tables_not_stock(tables: list[list[list[str | None]]]) -> list[TableDa
     tds.append(cda_into_table_gs(cdaGs))
     tds.append(bonds_into_table_usd(bondsUsd))
     tds.append(cda_into_table_usd(cdaUsd))
-    
+    tds.append(extract_stocks_in_gs(accionsGs))
     return tds
-
-
-def extract_stocks_in_gs(table: list[list[str | None]]) -> TableData:
-    idx_header = 0
-    for i, row in enumerate(table):
-        if "Emisor" in row:
-            idx_header = i
-            break
-    
-    stocksGs = pd.DataFrame(table[idx_header+1:], columns=table[idx_header])
-    stocksGs.columns = [re.sub(PATTERN_CID, replace_cid, col).translate(ESPECIAL_REPLACEMENT) for col in stocksGs.columns]
-    stocksGs.fillna(np.nan, inplace=True)
-    stocksGs = stocksGs.replace(["None", ""], np.nan)
-    stocksGs.dropna(how='all', inplace=True)
-    updatedRows(stocksGs)
-    stocksGs["Observaciones"] = stocksGs["Observaciones"].apply(LAMBDA_CALL)
-    stocksGs["Observaciones"] = stocksGs["Observaciones"].str.translate(ESPECIAL_REPLACEMENT)
-    stocksGs[["Disponibilidad", "Precio", "Valor de venta"]] = stocksGs[["Disponibilidad", "Precio", "Valor de venta"]].replace(r"\s+", "", regex=True)
-    return TableData.model_validate(stocksGs.to_dict(orient='split', index=False))
 
 
 def extrac_date_from_string(text: str) -> str:
@@ -309,20 +316,11 @@ def get_pdf_extract(url: str) -> None:
 
         bytes_pdf = BytesIO(response.content)
         pdf = pdfplumber.open(bytes_pdf)
-
-        tables = pdf.pages[0].extract_tables()
-        tableStock: list[list[str | None]] | None  = []
-        stocksGsTable = TableData()
-        if len(pdf.pages) == 3:
-            tables = tables + pdf.pages[1].extract_tables()
-            tableStock = pdf.pages[2].extract_table()
-        else:
-            tableStock = pdf.pages[1].extract_table()
+        tables: list[list[list[str|None]]] = []
+        for page in pdf.pages:
+            tables = tables + page.extract_tables()
         
-        list_tables  = build_tables_not_stock(tables)
-        if tableStock:
-            stocksGsTable = extract_stocks_in_gs(tableStock)        
-    
+        list_tables = build_tables_not_stock(tables)
         output_data = OutputData(
             mutualFundsGs=list_tables[0],
             mutualFundsUsd=list_tables[1],
@@ -332,7 +330,7 @@ def get_pdf_extract(url: str) -> None:
             cdaGs=list_tables[5],
             bondsUsd=list_tables[6],
             cdaUsd=list_tables[7],
-            stocks=stocksGsTable
+            stocks=list_tables[8]
         )
         output_data.mutual_funds_Gs.title = "Fondos Mutuos en Guaraníes"
         output_data.mutual_funds_usd.title = "Fondos Mutuos en Dólares"
