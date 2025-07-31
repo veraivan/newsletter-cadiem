@@ -101,7 +101,7 @@ def investment_to_table_data(df: pd.DataFrame) -> TableData:
 
 
 def split_to_bonds_and_cda(original: pd.DataFrame, dfB: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
-    searchIdx = original[original["Emisor"].notna() & original["Emisor"].str.contains("cda", case=False)].index.to_list()
+    searchIdx = original[original["Emisor"].notna() & original["Emisor"].str.fullmatch("CDA")].index.to_list()
     if len(searchIdx) > 0:
         dfA = original.loc[0:searchIdx[0]-1].copy()
         dfB = original.loc[searchIdx[0]:].copy()
@@ -158,12 +158,26 @@ def bonds_into_table_usd(df: pd.DataFrame) -> TableData:
     df.fillna(np.nan, inplace=True)
     df = df.replace(["None", ""], np.nan)
     df.columns = [re.sub(PATTERN_CID, replace_cid, col).translate(ESPECIAL_REPLACEMENT) for col in df.columns]
-    removeIdxs = df[df["Emisor"].notna() & df["Emisor"].str.contains("tasas|bonos|cda|emisor", case=False)].index
+    removeIdxs = df[(df["Emisor"].notna() & df["Emisor"].str.contains("tasas|bonos|cda|emisor|renta", case=False)) | (df["Calificación"].notna() & df["Calificación"].str.contains(r'entidad | vencimiento', case=False))].index
     df.drop(removeIdxs,inplace=True)
+    break_line_idxs: list[int] = df[df["Emisor"].notna() & df["Emisor"].str.contains(r"\n")].index.to_list()
+    for i in break_line_idxs:
+        values = str(df.loc[i,"Emisor"]).split("\n")
+        pos_value = 0
+        index = int(df.index[0])
+        while (pos_value < len(values)):
+            if not pd.isna(df.loc[index,"Calificación"]):
+                df.loc[index,"Emisor"] = values[pos_value]
+                pos_value += 1
+            else:
+                df.loc[index,"Emisor"] = values[pos_value-1]
+            index += 1
+
     indexs: list[int] = df[df["Calificación"].notna() & df["Calificación"].str.contains(r'[0-9]')].index.to_list()
     for i in indexs:
         values = str(df.loc[i,"Calificación"]).split(" ")
         df.loc[i,["Calificación", "Rendimiento"]] = values
+
     index_list: list[int] = df[df["Rendimiento"].notna() & df["Rendimiento"].str.contains(r"\n")].index.to_list()
     for index in index_list:
         for col in df.columns:
@@ -234,7 +248,7 @@ def extract_stocks_in_gs(df: pd.DataFrame) -> TableData:
     return TableData.model_validate(df.to_dict(orient='split', index=False))
 
 
-def build_tables_not_stock(tables: list[list[list[str | None]]]) -> list[TableData]:
+def build_tables(tables: list[list[list[str | None]]]) -> list[TableData]:
     mutualFundsGs = pd.DataFrame()
     mutualFundsUsd = pd.DataFrame()
     investmentFundsGs = pd.DataFrame()
@@ -320,7 +334,7 @@ def get_pdf_extract(url: str) -> None:
         for page in pdf.pages:
             tables = tables + page.extract_tables()
         
-        list_tables = build_tables_not_stock(tables)
+        list_tables = build_tables(tables)
         output_data = OutputData(
             mutualFundsGs=list_tables[0],
             mutualFundsUsd=list_tables[1],
