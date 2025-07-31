@@ -35,7 +35,7 @@ const App = () => {
 							Newsletter Cadiem
 						</h1>
 					</div>
-					<div className="flex flex-row mt-7 justify-around w-fit h-fit">
+					<div className="flex max-md:flex-col lg:flex-row mt-7 lg:justify-around max-md:items-center w-fit h-fit">
 						<Badge
 							className="p-2 font-mono [&>svg]:size-7" 
 							variant="secondary"
@@ -45,7 +45,7 @@ const App = () => {
 							{ newsletterDate }
 						</Badge>
 						<Badge
-							className="p-2 font-mono [&>svg]:size-7 ml-4" 
+							className="p-2 font-mono [&>svg]:size-7 lg:ml-4 max-md:mt-3" 
 							variant="secondary"
 						>
 							<FcClock size={28} color="#000" />
