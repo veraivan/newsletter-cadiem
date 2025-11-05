@@ -34,7 +34,7 @@ class RootListJSON(RootModel[list[ResponseJSON]]):
 
     def __getitem__(self,item: int) -> ResponseJSON:
         return self.root[item]
-    
+
     def getlist(self) -> list[ResponseJSON]:
         return self.root
 
@@ -63,7 +63,7 @@ def saveToJson(data: TrackJSON | OutputData, file_name: str) -> None:
         print(f"Error saving file: {e}")
 
 
-def replace_cid(match: re.Match[str]) -> str: 
+def replace_cid(match: re.Match[str]) -> str:
     return chr(int(match.group(1)))
 
 LAMBDA_CALL: Callable[[str],str] = lambda x: re.sub(PATTERN_CID, replace_cid, x)
@@ -150,7 +150,10 @@ def cda_into_table_gs(df: pd.DataFrame) -> TableData:
         removeIdxs = df[df["Emisor"].notna() & df["Emisor"].str.contains("tasas|renta|bonos|cda|emisor", case=False)].index
         df.drop(removeIdxs, inplace=True)
         updatedRows(df)
-        df["Valor Nominal"] = df["Valor Nominal"].replace(r"\s+", "", regex=True)
+        if 'Valor Nominal' in df.columns:
+            df["Valor Nominal"] = df["Valor Nominal"].replace(r"\s+", "", regex=True)
+        elif  'Valor por cada corte' in  df.columns:
+            df["Valor por cada corte"] = df["Valor por cada corte"].replace(r"\s+", "", regex=True)
     return TableData.model_validate(df.to_dict(orient='split', index=False))
 
 
@@ -280,7 +283,7 @@ def build_tables(tables: list[list[list[str | None]]]) -> list[TableData]:
                 if len(searchIdx) > 0:
                     accionsGs = other.loc[searchIdx[0]+1:]
                     other = other.loc[:searchIdx[0]-1]
-                
+
                 searchIdx = other[other["Emisor"].notna() & other["Emisor"].str.contains("bonos", case=False)].index.to_list()
                 if len(searchIdx) > 0:
                     bondsGs, cdaGs = split_to_bonds_and_cda(other.loc[:searchIdx[0]], cdaGs)
@@ -291,7 +294,7 @@ def build_tables(tables: list[list[list[str | None]]]) -> list[TableData]:
                         bondsGs, cdaGs = split_to_bonds_and_cda(other, cdaGs)
                     else:
                         bondsUsd, cdaUsd = split_to_bonds_and_cda(other, cdaUsd)
-    
+
     tds: list[TableData] = []
     tds.append(funds_to_table_data(mutualFundsGs))
     tds.append(funds_to_table_data(mutualFundsUsd))
@@ -333,7 +336,7 @@ def get_pdf_extract(url: str) -> None:
         tables: list[list[list[str|None]]] = []
         for page in pdf.pages:
             tables = tables + page.extract_tables()
-        
+
         list_tables = build_tables(tables)
         output_data = OutputData(
             mutualFundsGs=list_tables[0],
@@ -388,7 +391,7 @@ def main() -> None:
                         get_pdf_extract(mediaType.source_url)
     except requests.exceptions.RequestException as e:
         print(f"An error ocurred while trying to get to the URL: {e}")
-        
+
 
 if __name__ == "__main__":
     main()
