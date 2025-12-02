@@ -16,7 +16,7 @@ updates:
           - "*"
     ignore:
       - dependency-name: "*"
-      - update-types: ["version-update:semver-major"]
+        update-types: ["version-update:semver-major"]
 
   - package-ecosystem: "pip"
     directory: "/script/"
@@ -29,4 +29,4 @@ updates:
           - "*"
     ignore:
       - dependency-name: "*"
-      - update-types: ["version-update:semver-major"]
+        update-types: ["version-update:semver-major"]
