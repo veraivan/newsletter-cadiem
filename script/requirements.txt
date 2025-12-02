@@ -7,7 +7,7 @@ idna==3.11
 numpy==2.3.5
 pandas==2.3.3
 pandas-stubs==2.3.3.251201
-pdfminer.six==20250506
+pdfminer.six==20251107
 pdfplumber==0.11.8
 pillow==11.3.0
 pycparser==2.23
