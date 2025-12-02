@@ -289,7 +289,7 @@ def build_tables(tables: list[list[list[str | None]]]) -> list[TableData]:
                     bondsGs, cdaGs = split_to_bonds_and_cda(other.loc[:searchIdx[0]], cdaGs)
                     bondsUsd, cdaUsd = split_to_bonds_and_cda(other.loc[searchIdx[0]:], cdaUsd)
                 else:
-                    isGs = other["Disponibilidad"].str.contains("\\d+[\\.,]\\d+[\\.,]\\d+", regex=True, na=False).any()
+                    isGs = other["Disponibilidad"].str.contains("\\d+[\\.,]\\d+[\\.]\\d+", regex=True, na=False).any()
                     if isGs:
                         bondsGs, cdaGs = split_to_bonds_and_cda(other, cdaGs)
                     else:
