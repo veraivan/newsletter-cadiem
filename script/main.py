@@ -176,22 +176,21 @@ def bonds_into_table_usd(df: pd.DataFrame) -> TableData:
                 df.loc[index,"Emisor"] = values[pos_value-1]
             index += 1
 
-    indexs: list[int] = df[df["Calificación"].notna() & df["Calificación"].str.contains(r'[0-9]')].index.to_list()
-    for i in indexs:
-        values = str(df.loc[i,"Calificación"]).split(" ")
-        df.loc[i,["Calificación", "Rendimiento"]] = values
+    pattern = r"\d,\d\d%|\w+[\+-]?\s?[PpYy]{2}"
+    regexNumber = re.compile(r'\d')
+    indices: list[int] = df[df["Calificación"].notna()].index.tolist()
+    for x in indices:
+        val = str(df.loc[x,"Calificación"])
+        match: list[str] = re.findall(pattern, val)
+        if len(match) > 1:
+            position = 0
+            for item in match:
+                if regexNumber.search(item):
+                    df.loc[x+position, "Rendimiento"] = item
+                    position += 1
+                else:
+                    df.loc[x, "Calificación"] = item
 
-    index_list: list[int] = df[df["Rendimiento"].notna() & df["Rendimiento"].str.contains(r"\n")].index.to_list()
-    for index in index_list:
-        for col in df.columns:
-            if pd.notna(df.loc[index,col]):
-                list_values = str(df.loc[index,col]).split("\n")
-                if len(list_values) > 1:
-                    for x in range(0,len(list_values)):
-                        if pd.isna(df.loc[index+x,col]):
-                            df.loc[index+x,col] = list_values[x]
-                        else:
-                            df.loc[round(index+x*0.1,1),col] = list_values[x]
     df.sort_index(inplace=True, ignore_index=True)
     df.dropna(how='all', inplace=True)
     updatedRows(df)
@@ -276,7 +275,7 @@ def build_tables(tables: list[list[list[str | None]]]) -> list[TableData]:
                     investmentFundsGs = pd.DataFrame(table[1:], columns=table[0])
         else:
             if "Tasa" in table[0]:
-                cdaUsd = pd.DataFrame(table[1:],columns=table[0])
+                cdaGs = pd.DataFrame(table[1:],columns=table[0])
             else:
                 other = create_dataframe(table)
                 searchIdx = other[other["Emisor"].notna() & other["Emisor"].str.contains("acciones", case=False)].index.to_list()
