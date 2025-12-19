@@ -141,6 +141,7 @@ def bonds_into_table_gs(df: pd.DataFrame) -> TableData:
 
 def cda_into_table_gs(df: pd.DataFrame) -> TableData:
     if not df.empty:
+        df = df.astype("string")
         df.fillna(np.nan, inplace=True)
         df = df.replace(["None", ""], np.nan)
         df.dropna(how='all',inplace=True)
@@ -264,7 +265,7 @@ def build_tables(tables: list[list[list[str | None]]]) -> list[TableData]:
     for table in tables:
         if len(table[0]) == 7:
             if "Rendimiento" in table[0]:
-                if any(col and "G" in col for col in table[1]): 
+                if any(col and "G" in col for col in table[1]):
                     mutualFundsGs = pd.DataFrame(table[1:], columns=table[0])
                 else:
                     mutualFundsUsd = pd.DataFrame(table[1:], columns=table[0])
@@ -274,7 +275,9 @@ def build_tables(tables: list[list[list[str | None]]]) -> list[TableData]:
                 else:
                     investmentFundsGs = pd.DataFrame(table[1:], columns=table[0])
         else:
-            if "Tasa" in table[0]:
+            if "Cantidad" in table[0]:
+                cdaUsd = pd.DataFrame(table[1:],columns=table[0])
+            elif "Cant. Cortes" in table[0]:
                 cdaGs = pd.DataFrame(table[1:],columns=table[0])
             else:
                 other = create_dataframe(table)
@@ -288,11 +291,11 @@ def build_tables(tables: list[list[list[str | None]]]) -> list[TableData]:
                     bondsGs, cdaGs = split_to_bonds_and_cda(other.loc[:searchIdx[0]], cdaGs)
                     bondsUsd, cdaUsd = split_to_bonds_and_cda(other.loc[searchIdx[0]:], cdaUsd)
                 else:
-                    isGs = other["Disponibilidad"].str.contains("\\d+[\\.,]\\d+[\\.]\\d+", regex=True, na=False).any()
-                    if isGs:
-                        bondsGs, cdaGs = split_to_bonds_and_cda(other, cdaGs)
-                    else:
+                    isUsd = other["Disponibilidad"].str.contains("\\d+[\\.,]\\d+[\\.]\\d+", regex=True, na=False).any()
+                    if isUsd:
                         bondsUsd, cdaUsd = split_to_bonds_and_cda(other, cdaUsd)
+                    else:
+                        bondsGs, cdaGs = split_to_bonds_and_cda(other, cdaGs)
 
     tds: list[TableData] = []
     tds.append(funds_to_table_data(mutualFundsGs))
